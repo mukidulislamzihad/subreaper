@@ -1,5 +1,5 @@
 # subreaper.py - Python 3.11
-# SubReaper v2.1: async subdomain enumeration + origin IP discovery + email enumeration
+# SubReaper v2.2: async subdomain enumeration + origin IP discovery + email enumeration
 # Deps: pip install -r requirements.txt
 #   (optional, for WHOIS registrant email lookup) pip install python-whois
 # Usage:
@@ -29,7 +29,7 @@ CONCURRENCY      = 200
 ORIGIN_CONCURRENCY = 30
 EMAIL_CONCURRENCY  = 30
 BUFFER           = 65535
-USER_AGENT       = "SubReaper/2.1"
+USER_AGENT       = "SubReaper/2.2"
 
 PASSIVE_SOURCES = {
     "crtsh":        "https://crt.sh/?q=%25.{d}&output=json",
@@ -67,15 +67,12 @@ ORIGIN_PREFIXES = [
 ]
 
 # ---- email enumeration config ----
-# pages worth checking on every host for contact/staff emails
 EMAIL_PATHS = [
     "", "contact", "contact-us", "about", "about-us", "team",
     "support", "help", "privacy", "privacy-policy", "terms",
     "legal", "imprint", "impressum", "careers", "press",
 ]
 
-# junk / platform noise that shows up in scraped HTML but isn't a real
-# target-relevant address (tracking pixels, framework placeholders, etc.)
 EMAIL_JUNK_DOMAINS = {
     "example.com", "example.org", "example.net", "sentry.io",
     "wixpress.com", "godaddy.com", "schema.org", "w3.org",
@@ -83,9 +80,36 @@ EMAIL_JUNK_DOMAINS = {
     "yourdomain.com", "domain.com", "email.com", "test.com",
 }
 
-# file-extension-looking strings that the broad regex sometimes
-# mistakes for an email (e.g. image@2x.png style asset names)
 EMAIL_JUNK_TLDS = {"png", "jpg", "jpeg", "gif", "svg", "webp", "css", "js"}
+
+
+# ============ colors / banner ============
+class C:
+    RESET   = "\033[0m"
+    BOLD    = "\033[1m"
+    CYAN    = "\033[96m"
+    MAGENTA = "\033[95m"
+    YELLOW  = "\033[93m"
+    GREEN   = "\033[92m"
+    RED     = "\033[91m"
+
+
+def print_banner():
+    lines = [
+        (C.CYAN,    "   ____        _     ____                            "),
+        (C.CYAN,    "  / ___| _   _| |__ |  _ \\ ___  __ _ _ __   ___ _ __ "),
+        (C.MAGENTA, "  \\___ \\| | | | '_ \\| |_) / _ \\/ _` | '_ \\ / _ \\ '__|"),
+        (C.MAGENTA, "   ___) | |_| | |_) |  _ <  __/ (_| | |_) |  __/ |   "),
+        (C.YELLOW,  "  |____/ \\__,_|_.__/|_| \\_\\___|\\__,_| .__/ \\___|_|   "),
+        (C.YELLOW,  "                                     |_|              "),
+    ]
+    print()
+    for color, text in lines:
+        print(f"{C.BOLD}{color}{text}{C.RESET}")
+    print(f"{C.BOLD}{C.GREEN}{'=' * 60}{C.RESET}")
+    print(f"{C.BOLD}{C.YELLOW}   Developer : mukidul islam zihad{C.RESET}")
+    print(f"{C.BOLD}{C.YELLOW}   GitHub    : https://github.com/mukidulislamzihad{C.RESET}")
+    print(f"{C.BOLD}{C.GREEN}{'=' * 60}{C.RESET}")
 
 
 # ============ helpers ============
@@ -109,7 +133,6 @@ def make_resolver():
     return r
 
 def clean_emails(raw_matches):
-    """Lowercase, dedupe, and drop obvious junk matches."""
     out = set()
     for m in raw_matches:
         e = m.lower().strip().strip(".,;:'\"()<>[]")
@@ -129,8 +152,8 @@ def clean_emails(raw_matches):
 def classify_email(email, root_domain):
     dom = email.split("@", 1)[1]
     if dom == root_domain or dom.endswith("." + root_domain):
-        return "internal"   # belongs to the target's own domain/subdomains
-    return "external"       # third-party address that just appears on-site
+        return "internal"
+    return "external"
 
 # ============ Layer 1: Passive ============
 async def fetch_passive(session, name, url_tpl, domain):
@@ -444,7 +467,6 @@ async def favicon_hash(session, host):
     return None
 
 async def hunt_origin(host, resolver, session):
-    """Run all origin-finding techniques for a single host."""
     parts = host.split(".")
     root = ".".join(parts[-2:]) if len(parts) >= 2 else host
 
@@ -483,7 +505,6 @@ async def hunt_origin(host, resolver, session):
     }
 
 async def layer_origin(all_hosts):
-    """Run origin hunt for every subdomain, concurrency-limited."""
     resolver = make_resolver()
     sem = asyncio.Semaphore(ORIGIN_CONCURRENCY)
     results = {}
@@ -519,8 +540,6 @@ async def fetch_page_text(session, url):
         return ""
 
 async def crawl_host_emails(session, host, sem):
-    """Fetch a handful of common pages on a host and pull out emails
-    (from visible text, mailto: links, and inline scripts/meta tags)."""
     found = set()
     async with sem:
         for path in EMAIL_PATHS:
@@ -531,19 +550,15 @@ async def crawl_host_emails(session, host, sem):
                 if not text:
                     continue
                 got_any = True
-                # mailto: links first (highest confidence)
                 for m in re.findall(r'mailto:([^"\'\s?&<>]+)', text, flags=re.I):
                     found.add(m)
-                # generic text/attribute matches
                 found |= set(EMAIL_RE.findall(text))
-                break  # https worked (or returned something), skip http fallback
+                break
             if not got_any and path == "":
-                # homepage totally unreachable on both schemes -> skip this host
                 break
     return clean_emails(found)
 
 async def layer_email_crawl(hosts, root_domain):
-    """Crawl every discovered host (+ apex) for on-page emails."""
     sem = asyncio.Semaphore(EMAIL_CONCURRENCY)
     per_host = {}
     targets = sorted(set(hosts) | {root_domain, f"www.{root_domain}"})
@@ -562,7 +577,6 @@ async def layer_email_crawl(hosts, root_domain):
     return per_host
 
 async def email_via_dmarc(domain, resolver):
-    """DMARC 'rua=mailto:' / 'ruf=mailto:' aggregate-report contacts."""
     found = set()
     txts = await resolve_txt(f"_dmarc.{domain}", resolver)
     for t in txts:
@@ -571,7 +585,6 @@ async def email_via_dmarc(domain, resolver):
     return clean_emails(found)
 
 async def email_via_spf_include_domains(domain, resolver):
-    """Some orgs put a contact address in a plain TXT/SPF comment; cheap to check."""
     found = set()
     txts = await resolve_txt(domain, resolver)
     for t in txts:
@@ -579,11 +592,8 @@ async def email_via_spf_include_domains(domain, resolver):
     return clean_emails(found)
 
 async def email_via_whois(domain):
-    """Optional: registrant/admin/tech contact email via WHOIS.
-    Most gTLD registrars redact this behind privacy proxies now, so
-    treat any hit as a bonus, not a guarantee."""
     try:
-        import whois as pywhois  # pip install python-whois
+        import whois as pywhois
     except ImportError:
         return set(), False
     try:
@@ -597,12 +607,9 @@ async def email_via_whois(domain):
         raw |= set(EMAIL_RE.findall(text))
         return clean_emails(raw), True
     except Exception:
-        return set(), True  # library present but lookup failed/blocked
+        return set(), True
 
 async def layer_email(all_hosts, domain):
-    """Run every email-discovery technique and merge into one structure:
-    { email: {"type": internal/external, "sources": {...}, "seen_on": [...]} }
-    """
     resolver = make_resolver()
 
     crawl_task  = layer_email_crawl(all_hosts, domain)
@@ -743,7 +750,7 @@ def write_email_output(path, emails):
     except OSError as e:
         print(f"[!] Could not write email output: {e}")
 
-# ============ Orchestrator ============
+# ============ Orchestrator: full pipeline (used by CLI flags) ============
 async def reap(domain, wordlist_path=None, concurrency=CONCURRENCY,
                out_path=None, hunt_origin_flag=False, hunt_emails_flag=False):
     print(f"[*] Target: {domain}")
@@ -793,8 +800,6 @@ async def reap(domain, wordlist_path=None, concurrency=CONCURRENCY,
 
     email_data, whois_available = {}, False
     if hunt_emails_flag:
-        # cap how many hosts we crawl for pages -- scanning every single
-        # brute/perm hit is slow and low-yield, so bias toward live hosts
         crawl_targets = [h for h in all_hosts if h in probe] or all_hosts[:200]
         print(f"[7/7] email enumeration on {len(crawl_targets)} live hosts "
               f"(+ DMARC/TXT/WHOIS on apex)...")
@@ -813,61 +818,73 @@ async def reap(domain, wordlist_path=None, concurrency=CONCURRENCY,
 
     return all_hosts
 
+# ============ Orchestrator: email-only (interactive menu path) ============
+async def reap_email_only(domain, out_path=None):
+    """Skip subdomain enumeration entirely - just hit the apex + www with
+    every email-discovery technique (web crawl, DMARC, TXT/SPF, WHOIS)."""
+    print(f"[*] Target: {domain}")
+    print("[1/1] email enumeration only (no subdomain scan)...")
+    targets = [domain, f"www.{domain}"]
+    email_data, whois_available = await layer_email(targets, domain)
+    print_email_results(email_data, whois_available)
+
+    if out_path:
+        write_email_output(out_path, email_data)
+
+    return email_data
+
 def prompt_modes():
-    """Interactive menu: ask the user which scan(s) to run.
-    Subdomain enumeration always runs (it's the base layer everything
-    else needs) -- this just decides whether origin-hunt and/or
-    email-enum run on top of it."""
-    print("\n" + "=" * 60)
-    print(" SubReaper - what do you want to run?")
-    print("=" * 60)
-    print(" 1) Subdomain enumeration only")
-    print(" 2) Subdomain enumeration + Origin IP hunt")
-    print(" 3) Subdomain enumeration + Email enumeration")
-    print(" 4) Subdomain enumeration + Origin IP hunt + Email enumeration (all)")
-    print("=" * 60)
+    """Interactive menu - email enumeration only."""
+    print(f"\n{C.BOLD}{C.GREEN}{'=' * 60}{C.RESET}")
+    print(f"{C.BOLD}{C.CYAN} SubReaper - what do you want to run?{C.RESET}")
+    print(f"{C.BOLD}{C.GREEN}{'=' * 60}{C.RESET}")
+    print(f"{C.YELLOW} 1) Email enumeration only{C.RESET}")
+    print(f"{C.BOLD}{C.GREEN}{'=' * 60}{C.RESET}")
     while True:
-        choice = input("Choose an option [1-4]: ").strip()
-        if choice in ("1", "2", "3", "4"):
+        choice = input("Choose an option [1]: ").strip()
+        if choice == "1":
             break
-        print("  -> invalid choice, pick 1, 2, 3 or 4")
-    hunt_origin = choice in ("2", "4")
-    hunt_emails = choice in ("3", "4")
-    return hunt_origin, hunt_emails
+        print("  -> invalid choice, pick 1")
+    return "email_only"
 
 def main():
+    print_banner()
+
     ap = argparse.ArgumentParser(
         prog="subreaper",
-        description="SubReaper v2.1 - subdomain enumeration + origin IP discovery + email enumeration",
+        description="SubReaper v2.2 - subdomain enumeration + origin IP discovery + email enumeration",
     )
     ap.add_argument("domain", help="root domain, e.g. example.com")
     ap.add_argument("--wordlist", default=None, help="path to wordlist file")
     ap.add_argument("--threads", type=int, default=CONCURRENCY,
                     help="concurrency (default 200)")
     ap.add_argument("-o", "--output", default=None,
-                    help="save host list to file (detail + origin/email json too)")
+                    help="save host list / email results to file")
     ap.add_argument("--hunt-origin", action="store_true",
-                    help="run origin IP hunt on all discovered subdomains")
+                    help="run full pipeline with origin IP hunt (non-interactive)")
     ap.add_argument("--hunt-emails", action="store_true",
-                    help="crawl live hosts + DNS (DMARC/TXT) + optional WHOIS for emails")
+                    help="run full pipeline with email enumeration (non-interactive)")
+    ap.add_argument("--email-only", action="store_true",
+                    help="skip subdomain scan entirely, email enumeration only (non-interactive)")
     ap.add_argument("-y", "--yes", action="store_true",
                     help="skip the interactive menu (use only the flags above; "
                          "needed for cron/scripts/non-tty runs)")
     args = ap.parse_args()
 
-    hunt_origin = args.hunt_origin
-    hunt_emails = args.hunt_emails
-
-    # if the user didn't pass either flag explicitly, and this is an
-    # interactive terminal, ask via the menu instead of silently doing
-    # subdomain-enum-only.
-    if not args.yes and not args.hunt_origin and not args.hunt_emails and sys.stdin.isatty():
-        hunt_origin, hunt_emails = prompt_modes()
-
     try:
+        if args.email_only:
+            asyncio.run(reap_email_only(args.domain, args.output))
+            return
+
+        if not args.yes and not args.hunt_origin and not args.hunt_emails and sys.stdin.isatty():
+            mode = prompt_modes()
+            if mode == "email_only":
+                asyncio.run(reap_email_only(args.domain, args.output))
+                return
+
         asyncio.run(reap(
             args.domain, args.wordlist, args.threads,
-            args.output, hunt_origin, hunt_emails,
+            args.output, args.hunt_origin, args.hunt_emails,
         ))
     except KeyboardInterrupt:
         print("\n[!] aborted")
