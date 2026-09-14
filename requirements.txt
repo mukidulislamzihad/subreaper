@@ -1,0 +1,4 @@
+aiohttp>=3.9
+dnspython>=2.4
+mmh3>=4.0
+python-whois>=0.9.4
